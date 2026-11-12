@@ -1,6 +1,7 @@
-//! Port of blue_sampler.grad.fields (_field_from_density, _log_barier, spatial_grad lookup).
+//! Target side of adaptive Gaussian blue noise: the image seen through Gaussians of every size.
+//! `grad[k]` is the gradient of (rho ⊛ g_t) for t = T0·2^k (g_t: unit-mass Gaussian of variance t per axis),
+//! so a dot with its own kernel size reads its attraction between two levels of this pyramid.
 use crate::image::G;
-use crate::rng::Rng;
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::sync::Arc;
 
@@ -33,45 +34,67 @@ impl Fft2 {
 #[inline]
 fn freq(k: usize) -> f64 { if k < G / 2 { k as f64 } else { k as f64 - G as f64 } }
 
-pub struct Density { rho_max: f64, rho: Vec<f64>, rho_hat: Vec<C> }
+/// Smallest kernel variance of the pyramid: half a pixel of standard deviation.
+pub const T0: f64 = 0.25 / (G * G) as f64;
+/// Pyramid levels (one octave of variance each): up to a standard deviation of ~45 pixels.
+pub const LEVELS: usize = 14;
+
+pub struct Density {
+    fft: Fft2,
+    /// FFT of the density, scaled to mean 1.
+    rho_hat: Vec<C>,
+    pub rho_max: f32,
+    /// rho (mean 1) on the grid, for the initial draw.
+    pub rho: Vec<f32>,
+    /// grad[k][2·(ix·G + iy)..]: gradient of rho ⊛ g_(T0·2^k), interleaved x, y.
+    pub grad: Vec<Vec<f32>>,
+}
 
 impl Density {
-    pub fn new(rho: Vec<f64>, fft: &mut Fft2) -> Self {
-        let mut rho_hat: Vec<C> = rho.iter().map(|&v| C::new(v, 0.0)).collect();
+    pub fn new(rho: Vec<f64>) -> Self {
+        let mut fft = Fft2::new();
+        let mean = rho.iter().sum::<f64>() / (G * G) as f64;
+        let rho: Vec<f32> = rho.iter().map(|&v| (v / mean) as f32).collect();
+        let mut rho_hat: Vec<C> = rho.iter().map(|&v| C::new(v as f64, 0.0)).collect();
         fft.run(&mut rho_hat, false);
-        let rho_max = rho.iter().cloned().fold(f64::MIN, f64::max);
-        Density { rho_max, rho, rho_hat }
+        let pi = std::f64::consts::PI;
+        let mut grad = Vec::with_capacity(LEVELS);
+        let mut buf = vec![C::default(); G * G];
+        for k in 0..LEVELS {
+            let t = T0 * (1u64 << k) as f64;
+            // both components in one complex inverse FFT: real part d/dx, imaginary part d/dy
+            for (i, b) in buf.iter_mut().enumerate() {
+                let (a, c) = (freq(i / G), freq(i % G));
+                let g = (-2.0 * pi * pi * t * (a * a + c * c)).exp();
+                *b = rho_hat[i] * C::new(0.0, 2.0 * pi * g) * C::new(a, c);
+            }
+            fft.run(&mut buf, true);
+            grad.push(buf.iter().flat_map(|z| [z.re as f32, z.im as f32]).collect());
+        }
+        let rho_max = rho.iter().cloned().fold(0.0, f32::max);
+        Density { fft, rho_hat, rho_max, rho, grad }
     }
 
-    /// Gradient field (G*G*2, f32, interleaved) for kernel width sigma2.
-    /// field = grad( V * (rho.max - rho - log_barrier(V * rho)) ), V = exp(-r^2/sigma2).
-    pub fn field(&self, sigma2: f64, fft: &mut Fft2, rng: &mut Rng) -> Vec<f32> {
+    /// rho ⊛ g_t on the grid (mean 1): the local density that sizes the kernels at one level.
+    pub fn smooth(&mut self, t: f64) -> Vec<f32> {
         let pi = std::f64::consts::PI;
-        let c = (G * G) as f64 * (pi * sigma2);
-        let v_hat: Vec<f64> = (0..G * G)
-            .map(|k| { let (a, b) = (freq(k / G), freq(k % G)); c * (-(pi * pi) * sigma2 * (a * a + b * b)).exp() })
-            .collect();
-        // rho_smooth
-        let mut buf: Vec<C> = self.rho_hat.iter().zip(&v_hat).map(|(r, v)| r * v).collect();
-        fft.run(&mut buf, true);
-        let mean = buf.iter().map(|z| z.re).sum::<f64>() / (G * G) as f64;
-        let alpha = mean * 1e-3;
-        // anti_rho - barrier
-        for (k, z) in buf.iter_mut().enumerate() {
-            let barrier = alpha / ((z.re / mean).max(0.0) + 1e-4) * (1.0 + rng.f64());
-            *z = C::new(self.rho_max - self.rho[k] - barrier, 0.0);
-        }
-        fft.run(&mut buf, false);
-        // both gradient components in one complex inverse FFT (each is real up to the
-        // Nyquist bin, where V_hat underflows to ~0 for every sigma2 used here)
-        for k in 0..G * G {
-            let (a, b) = (freq(k / G), freq(k % G));
-            let g = C::new(0.0, 2.0 * pi * v_hat[k]);
-            buf[k] = buf[k] * g * C::new(a, b);
-        }
-        fft.run(&mut buf, true);
-        let mut out = vec![0f32; G * G * 2];
-        for k in 0..G * G { out[2 * k] = buf[k].re as f32; out[2 * k + 1] = buf[k].im as f32; }
-        out
+        let mut buf: Vec<C> = self.rho_hat.iter().enumerate().map(|(i, r)| {
+            let (a, c) = (freq(i / G), freq(i % G));
+            r * (-2.0 * pi * pi * t * (a * a + c * c)).exp()
+        }).collect();
+        self.fft.run(&mut buf, true);
+        buf.iter().map(|z| z.re as f32).collect()
     }
+}
+
+/// Bilinear weights of a point of the unit torus on the grid (samples at cell centres).
+#[inline]
+pub fn bilinear(p: [f32; 2]) -> ([usize; 4], [f32; 4]) {
+    let (u, v) = (p[0] * G as f32 - 0.5, p[1] * G as f32 - 0.5);
+    let (fu, fv) = (u.floor(), v.floor());
+    let (a, b) = (u - fu, v - fv);
+    let m = G as i32;
+    let (x0, y0) = ((fu as i32).rem_euclid(m) as usize, (fv as i32).rem_euclid(m) as usize);
+    let (x1, y1) = ((x0 + 1) % G, (y0 + 1) % G);
+    ([x0 * G + y0, x0 * G + y1, x1 * G + y0, x1 * G + y1], [(1.0 - a) * (1.0 - b), (1.0 - a) * b, a * (1.0 - b), a * b])
 }
