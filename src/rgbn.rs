@@ -1,20 +1,30 @@
-//! Port of blue_sampler.run.run_recursive._recursive_pipeline for D=2 with an image target
-//! (what im2points -> sample_points(method="rgbn", targets=image) executes), plus `refine`, which
-//! continues the finest level for more steps ("Optimise further" in the page).
-use crate::field::{Density, Fft2};
+//! Recursive *adaptive* Gaussian blue noise.
+//!
+//! The energy is the one of GBN (Ahmed, Ren, Wonka 2022): every dot carries a Gaussian whose size follows
+//! the local density (variance σ²/a, a = target density at the dot, mean 1), and the dots' kernels must
+//! add up to the image. Its gradient is a pair repulsion with the combined kernel of the two dots, and an
+//! attraction to the image blurred by the dot's own kernel (read from the pyramid in `field`).
+//!
+//! The speed is the one of rgbn: neighbours come from a grid sort (the sorted grid stretches with the
+//! density, exactly like the kernels, so the same stencil serves dark and pale areas), and the dots are optimised
+//! coarse to fine, each level cloned ×3 from the previous one.
+use crate::field::{bilinear, Density, LEVELS, T0};
 use crate::gridsort::GridSorter;
 use crate::image::G;
 use crate::rng::Rng;
 
-// 2D preset with target: S=0.5, expension_factor=0.3, LR_spatial=0.1, spatial_radius=7
-const S: f64 = 0.5;
 const EXPANSION: f64 = 0.3;
-const LR_SPATIAL: f64 = 0.1;
-const SPATIAL_RADIUS: i32 = 7;
+const LR: f32 = 0.3;
+/// Grid neighbourhood of the pair sum. A dot in a pale area next to a dark one has many more neighbours
+/// within reach than a dot in a flat area: 7 keeps the density of pale areas within ~6 % (10: ~1 %, 3× slower).
+const STENCIL: i32 = 7;
 const ROOT_N_ITER: usize = 20;
 const N_PER_STEP: usize = 10;
-/// exp(-d2/sigma2) is skipped when d2/sigma2 > CUTOFF (contribution < 1e-15, below f32 precision)
-const CUTOFF: f32 = 34.0;
+/// Kernels stop growing below this density (× the mean): keeps near-white areas finite.
+const A_MIN: f32 = 1.0 / 32.0;
+/// Longest move of a dot in one step, in local spacings.
+const MAX_MOVE: f32 = 0.3;
+const CUTOFF: f32 = 30.0;
 
 pub trait Observer {
     fn progress(&mut self, _done: f64, _total: f64) {}
@@ -23,7 +33,6 @@ pub trait Observer {
 pub struct Silent;
 impl Observer for Silent {}
 
-/// integers_in_half_ball(radius, 2)
 fn half_ball(radius: i32) -> Vec<(i32, i32)> {
     let mut v = vec![];
     for a in -radius..=radius {
@@ -46,25 +55,35 @@ fn level_sizes(n: usize) -> Vec<usize> {
 #[inline]
 fn wrap(x: f32) -> f32 { x - x.floor() }
 
-/// The rgbn optimiser for one target density. Keeps its random stream and the target field of the
-/// last level, so `refine` simply carries on where `run` stopped.
 pub struct Rgbn {
     rng: Rng,
-    fft: Fft2,
     density: Density,
     shifts: Vec<(i32, i32)>,
-    /// (dot count, target field) of the last level optimised
-    field: Option<(usize, Vec<f32>)>,
+    /// (dot count, local density map a) of the last level optimised
+    amap: Option<(usize, Vec<f32>)>,
 }
 
 impl Rgbn {
     pub fn new(rho: Vec<f64>, seed: u64) -> Self {
-        let mut fft = Fft2::new();
-        let density = Density::new(rho, &mut fft);
-        Rgbn { rng: Rng::new(seed), fft, density, shifts: half_ball(SPATIAL_RADIUS), field: None }
+        Rgbn { rng: Rng::new(seed), density: Density::new(rho), shifts: half_ball(STENCIL), amap: None }
     }
 
-    /// Full recursive pipeline: n dots, `n_iter` passes (of N_PER_STEP steps) per level.
+    fn set_level(&mut self, n: usize) {
+        if !matches!(&self.amap, Some((m, _)) if *m == n) {
+            // density seen at the scale of the mean spacing of this level
+            let mut a = self.density.smooth(0.25 / n as f64);
+            for v in a.iter_mut() { *v = v.max(A_MIN); }
+            self.amap = Some((n, a));
+        }
+    }
+
+    #[inline]
+    fn a_at(&self, p: [f32; 2]) -> f32 {
+        let (i, w) = bilinear(p);
+        let a = &self.amap.as_ref().unwrap().1;
+        a[i[0]] * w[0] + a[i[1]] * w[1] + a[i[2]] * w[2] + a[i[3]] * w[3]
+    }
+
     pub fn run(&mut self, n: usize, n_iter: usize, obs: &mut dyn Observer) -> Vec<[f32; 2]> {
         let sizes = level_sizes(n.max(2));
         let steps = |k: usize| if k == 0 { ROOT_N_ITER } else { n_iter } * N_PER_STEP;
@@ -72,47 +91,65 @@ impl Rgbn {
         let mut done = 0.0;
         let mut x: Vec<[f32; 2]> = vec![];
         for (k, &m) in sizes.iter().enumerate() {
-            // initial points: random (root) or cloned from the coarser level
-            x = if k == 0 {
-                (0..m).map(|_| [self.rng.f64() as f32, self.rng.f64() as f32]).collect()
-            } else {
-                clone(&x, m, &mut self.rng)
-            };
-            let field = self.density.field(S * 2.0 / m as f64, &mut self.fft, &mut self.rng);
-            self.field = Some((m, field));
+            self.set_level(m);
+            x = if k == 0 { self.draw(m) } else { self.clone(&x, m) };
             x = self.descend(x, steps(k), &mut || { done += (m * N_PER_STEP) as f64; obs.progress(done, total); });
             obs.level_done(&x);
         }
         x
     }
 
-    /// `steps` more rgbn steps on existing dots, at the finest level (same field as the end of `run`).
     pub fn refine(&mut self, x: Vec<[f32; 2]>, steps: usize, obs: &mut dyn Observer) -> Vec<[f32; 2]> {
         let n = x.len();
         if n == 0 { return x; }
-        if !matches!(&self.field, Some((m, _)) if *m == n) {
-            let field = self.density.field(S * 2.0 / n as f64, &mut self.fft, &mut self.rng);
-            self.field = Some((n, field));
-        }
+        self.set_level(n);
         let mut done = 0;
         self.descend(x, steps, &mut || { done += N_PER_STEP; obs.progress(done.min(steps) as f64, steps as f64); })
     }
 
-    /// Gradient descent of the dots on the current field. The dots are re-sorted onto the grid
-    /// every N_PER_STEP steps (`on_sort` is called then).
+    /// Root level: dots drawn from the density (rejection sampling).
+    fn draw(&mut self, m: usize) -> Vec<[f32; 2]> {
+        let mut out = Vec::with_capacity(m);
+        while out.len() < m {
+            let p = [self.rng.f64() as f32, self.rng.f64() as f32];
+            let c = ((p[0] * G as f32) as usize).min(G - 1) * G + ((p[1] * G as f32) as usize).min(G - 1);
+            if self.density.rho[c] > self.rng.f64() as f32 * self.density.rho_max { out.push(p); }
+        }
+        out
+    }
+
+    /// Expand N/3 parents into N children on small randomly rotated triangles, sized by the local spacing.
+    fn clone(&mut self, parents: &[[f32; 2]], n: usize) -> Vec<[f32; 2]> {
+        let mut xv = parents.to_vec();
+        self.rng.shuffle(&mut xv);
+        let np = n / 3;
+        let simplex = [(-0.75f64.sqrt(), -0.5), (0.75f64.sqrt(), -0.5), (0.0, 1.0)];
+        let mut out: Vec<[f32; 2]> = xv[np..].to_vec();
+        for p in &xv[..np] {
+            let scale = EXPANSION / (n as f64 * self.a_at(*p) as f64).sqrt();
+            let (s, c) = (self.rng.f64() * std::f64::consts::TAU).sin_cos();
+            for &(a, b) in &simplex {
+                out.push([wrap(p[0] + ((c * a - s * b) * scale) as f32), wrap(p[1] + ((s * a + c * b) * scale) as f32)]);
+            }
+        }
+        out
+    }
+
+    /// Preconditioned gradient descent on the GBN energy. Dots are re-sorted onto the grid, and their
+    /// kernel sizes re-read, every N_PER_STEP steps.
     fn descend(&mut self, x: Vec<[f32; 2]>, steps: usize, on_sort: &mut dyn FnMut()) -> Vec<[f32; 2]> {
         let n = x.len();
-        let field = &self.field.as_ref().unwrap().1;
         let gi = (n as f64).sqrt().ceil() as usize;
-        let gi = if gi * gi < n { gi + 1 } else { gi };
         let cells = gi * gi;
-        let inv_s2 = (1.0 / (S * 2.0 / n as f64)) as f32;
-        let lr = (LR_SPATIAL / S * 0.5) as f32; // lr_micro = lr_macro
+        let sigma2 = 1.0 / n as f32;                 // pair kernel exp(-c r²/σ²), c = 2 a_i a_j / (a_i + a_j)
+        let inv_s2 = 1.0 / sigma2;
+        let pull = std::f32::consts::PI * sigma2 / 2.0;   // weight of the image term against the pair sum
         let sorter = GridSorter::new(gi);
 
-        // prepare_points: first n cells real, others NaN (fictive)
         let mut grid: Vec<[f32; 2]> = vec![[f32::NAN; 2]; cells];
         grid[..n].copy_from_slice(&x);
+        let mut ga = vec![1f32; cells];              // a per cell
+        let mut lv = vec![(0usize, 0f32); cells];    // pyramid level and blend per cell
         let mut gx = vec![[0f32; 2]; cells];
         let mut tmp: Vec<[f32; 2]> = vec![[0.0; 2]; cells];
         let mut empty = vec![false; cells];
@@ -120,7 +157,6 @@ impl Rgbn {
 
         for step in 0..steps {
             if step % N_PER_STEP == 0 {
-                // gridify: empties get random positions for the sort, then back to NaN
                 for c in 0..cells {
                     let v = grid[c];
                     empty[c] = !(v[0].is_finite() && v[1].is_finite());
@@ -130,81 +166,71 @@ impl Rgbn {
                 for c in 0..cells {
                     let o = order[c] as usize;
                     grid[c] = if empty[o] { [f32::NAN; 2] } else { tmp[o] };
+                    if empty[o] { continue; }
+                    let a = self.a_at(grid[c]);
+                    ga[c] = a;
+                    // the dot's own kernel has variance σ²/(4a) per axis
+                    let l = ((sigma2 as f64 / (4.0 * a as f64) / T0).log2() as f32).clamp(0.0, (LEVELS - 1) as f32 - 1e-3);
+                    lv[c] = (l as usize, l.fract());
                 }
                 on_sort();
             }
-            // micro gradient: pair forces over the half-ball of grid shifts (action/reaction)
-            micro_grad(&grid, gi, &self.shifts, inv_s2, &mut gx, &mut cb);
-            // descent step with the target field (nearest cell lookup on the 512x512 grid)
+            micro_grad(&grid, &ga, gi, &self.shifts, inv_s2, &mut gx, &mut cb);
             for c in 0..cells {
                 let v = grid[c];
                 if v[0].is_nan() { continue; }
-                let ix = ((v[0] * G as f32).floor() as i32).rem_euclid(G as i32) as usize;
-                let iy = ((v[1] * G as f32).floor() as i32).rem_euclid(G as i32) as usize;
-                let f = 2 * (ix * G + iy);
-                grid[c] = [
-                    wrap(v[0] - lr * (gx[c][0] + field[f])),
-                    wrap(v[1] - lr * (gx[c][1] + field[f + 1])),
-                ];
+                let a = ga[c];
+                let (i, w) = bilinear(v);
+                let (k, f) = lv[c];
+                let (f0, f1) = (&self.density.grad[k], &self.density.grad[k + 1]);
+                let mut at = [0f32; 2];
+                for q in 0..4 {
+                    for d in 0..2 { at[d] += w[q] * (f0[2 * i[q] + d] * (1.0 - f) + f1[2 * i[q] + d] * f); }
+                }
+                // descent direction, preconditioned by a⁻² so that every dot moves in units of its own spacing
+                let s = LR / (a * a);
+                let mut dx = s * (pull * at[0] - gx[c][0]);
+                let mut dy = s * (pull * at[1] - gx[c][1]);
+                let lim = MAX_MOVE * (sigma2 / a).sqrt();
+                let m = (dx * dx + dy * dy).sqrt();
+                if m > lim { dx *= lim / m; dy *= lim / m; }
+                grid[c] = [wrap(v[0] + dx), wrap(v[1] + dy)];
             }
         }
         grid.into_iter().filter(|v| v[0].is_finite() && v[1].is_finite()).collect()
     }
 }
 
-/// Expand N//3 parents into N children with randomly rotated equilateral-triangle offsets.
-fn clone(parents: &[[f32; 2]], n: usize, rng: &mut Rng) -> Vec<[f32; 2]> {
-    let mut xv = parents.to_vec();
-    rng.shuffle(&mut xv);
-    let np = n / 3;
-    let scale = EXPANSION / (n as f64).sqrt();
-    // simplex(2): (-sqrt3/2, -1/2), (sqrt3/2, -1/2), (0, 1)
-    let simplex = [(-0.75f64.sqrt(), -0.5), (0.75f64.sqrt(), -0.5), (0.0, 1.0)];
-    let mut out: Vec<[f32; 2]> = xv[np..].to_vec();
-    for p in &xv[..np] {
-        let t = rng.f64() * std::f64::consts::TAU;
-        let (s, c) = t.sin_cos();
-        for &(a, b) in &simplex {
-            let ox = (c * a - s * b) * scale;
-            let oy = (s * a + c * b) * scale;
-            let px = p[0] as f64 + ox; let py = p[1] as f64 + oy;
-            out.push([(px - px.floor()) as f32, (py - py.floor()) as f32]);
-        }
-    }
-    out
-}
-
-/// exp(x) for x in [-CUTOFF, 0], branch-free (auto-vectorises), rel. error ~1e-7.
 #[inline(always)]
 fn fast_exp(x: f32) -> f32 {
     let t = x * std::f32::consts::LOG2_E;
-    let n = (t + 12_582_912.0) - 12_582_912.0; // round-to-nearest without SSE4.1
+    let n = (t + 12_582_912.0) - 12_582_912.0;
     let f = (x - n * 0.693_145_75) - n * 1.428_606_8e-6;
     let p = 1.0 + f * (1.0 + f * (0.5 + f * (0.166_666_67 + f * (0.041_666_668 + f * (0.008_333_334 + f * 0.001_388_889)))));
     p * f32::from_bits(((n as i32 + 127) as u32) << 23)
 }
 
-/// torus_delta for d in (-1, 1): d - round(d), as compare/select (vectorises everywhere)
 #[inline(always)]
 fn tdelta(d: f32) -> f32 {
     let d = if d > 0.5 { d - 1.0 } else { d };
     if d < -0.5 { d + 1.0 } else { d }
 }
 
+/// out = (x_q - x_p) · c² exp(-c r²/σ²): minus the pair force on p, plus the one on q.
 #[inline(always)]
-fn pair_segment(xp: &[[f32; 2]], xq: &[[f32; 2]], inv_s2: f32, out: &mut [[f32; 2]]) {
-    for ((a, b), o) in xp.iter().zip(xq).zip(out.iter_mut()) {
+fn pair_segment(xp: &[[f32; 2]], xq: &[[f32; 2]], ap: &[f32], aq: &[f32], inv_s2: f32, out: &mut [[f32; 2]]) {
+    for ((((a, b), &ai), &aj), o) in xp.iter().zip(xq).zip(ap).zip(aq).zip(out.iter_mut()) {
         let d0 = tdelta(b[0] - a[0]);
         let d1 = tdelta(b[1] - a[1]);
-        let r = (d0 * d0 + d1 * d1) * inv_s2;
-        let w = fast_exp(-r.min(CUTOFF));
-        // NaN (fictive cell) or far pair -> 0, like clean_grad
-        *o = if r < CUTOFF { [d0 * w, d1 * w] } else { [0.0, 0.0] };
+        let c = 2.0 * ai * aj / (ai + aj);
+        let r = (d0 * d0 + d1 * d1) * inv_s2 * c;
+        let w = c * c * fast_exp(-r.min(CUTOFF));
+        *o = if r < CUTOFF { [d0 * w, d1 * w] } else { [0.0, 0.0] };   // NaN (empty cell) or far pair -> 0
     }
 }
 
 #[inline(never)]
-fn micro_grad(grid: &[[f32; 2]], gi: usize, shifts: &[(i32, i32)], inv_s2: f32,
+fn micro_grad(grid: &[[f32; 2]], ga: &[f32], gi: usize, shifts: &[(i32, i32)], inv_s2: f32,
               gx: &mut [[f32; 2]], cb: &mut [[f32; 2]]) {
     for g in gx.iter_mut() { *g = [0.0; 2]; }
     for &(s0, s1) in shifts {
@@ -212,9 +238,8 @@ fn micro_grad(grid: &[[f32; 2]], gi: usize, shifts: &[(i32, i32)], inv_s2: f32,
         for i in 0..gi {
             let qi = (i + gi - s0 as usize) % gi;
             let (p, q) = (i * gi, qi * gi);
-            // j in s..gi -> jq = j - s ; j in 0..s -> jq = j + gi - s
-            pair_segment(&grid[p + s..p + gi], &grid[q..q + gi - s], inv_s2, &mut cb[s..]);
-            pair_segment(&grid[p..p + s], &grid[q + gi - s..q + gi], inv_s2, &mut cb[..s]);
+            pair_segment(&grid[p + s..p + gi], &grid[q..q + gi - s], &ga[p + s..p + gi], &ga[q..q + gi - s], inv_s2, &mut cb[s..]);
+            pair_segment(&grid[p..p + s], &grid[q + gi - s..q + gi], &ga[p..p + s], &ga[q + gi - s..q + gi], inv_s2, &mut cb[..s]);
             for (g, c) in gx[p..p + gi].iter_mut().zip(cb.iter()) { g[0] += c[0]; g[1] += c[1]; }
             for (j, c) in cb.iter().enumerate() {
                 let jq = if j >= s { j - s } else { j + gi - s };
