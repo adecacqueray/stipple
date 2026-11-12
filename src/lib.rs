@@ -1,6 +1,7 @@
 //! Stipple: recursive Gaussian blue-noise stippling (port of `blue_sampler.im2points`, method rgbn)
 //! and all the geometry the web app draws from (Voronoi cells, stroke directions, colours).
 //! The browser side only handles the interface and the drawing.
+pub mod backdrop;
 pub mod blur;
 pub mod colour;
 pub mod field;
@@ -122,6 +123,25 @@ mod wasm {
     pub extern "C" fn refine(steps: u32) { scene().refine(steps as usize, &mut Js); }
     #[no_mangle]
     pub extern "C" fn analyse() { scene().analyse(); }
+
+    // The photo backdrop. The page runs its own instance of this module for it (outside the worker), so the
+    // backdrop can follow the sliders while a stipple is running.
+    static mut PHOTO: (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());   // source RGBA, recoloured RGBA
+
+    /// Copy the photo (RGBA, `len` bytes, already in wasm memory at `ptr`) as the backdrop's source.
+    #[no_mangle]
+    #[allow(static_mut_refs)]
+    pub unsafe extern "C" fn set_photo(ptr: *const u8, len: u32) {
+        PHOTO.0 = std::slice::from_raw_parts(ptr, len as usize).to_vec();
+        PHOTO.1 = vec![0; len as usize];
+    }
+    /// Recolour the photo for the current sliders (see backdrop::recolour); returns a pointer to the RGBA result.
+    #[no_mangle]
+    #[allow(static_mut_refs)]
+    pub unsafe extern "C" fn backdrop(tint: f32, gain: f32, strength: f32, paper: u32) -> *const u8 {
+        backdrop::recolour(&PHOTO.0, &mut PHOTO.1, tint, gain, strength, paper as u8);
+        PHOTO.1.as_ptr()
+    }
 
     /// Result buffers: 0 points (f32), 1 rgb (u8), 2 cell rgb (u8), 3 ink (f32), 4 dir (f32),
     /// 5 cell vertices (f32), 6 cell offsets (u32), 7 edges (f32). Lengths are in elements.

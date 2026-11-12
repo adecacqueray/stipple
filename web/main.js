@@ -23,20 +23,24 @@ const dotScale = () => +$('size').value / 100;
 const tint = () => +$('tint').value / 100;
 const gap = () => +$('gap').value / 100;
 const gain = () => +$('gain').value / 100;
+const bgStrength = () => +$('bg').value / 100;
 const styleNow = () => document.querySelector('input[name=style]:checked').value;
 const SIZE_LABEL = { dots: 'Dot size', mesh: 'Dot size', strokes: 'Stroke width' };
+const SIZE_MAX = { dots: 100, mesh: 100, strokes: 160 };   // strokes may go wider than dots
 function syncOutputs() {
   $('nOut').textContent = fmt(N());
-  $('sizeOut').textContent = dotScale().toFixed(2);
   const t = tint();
   $('tintOut').textContent = t === 0 ? 'Black & white' : t === 1 ? 'Full colour' : t.toFixed(2);
   $('sizeLabel').textContent = SIZE_LABEL[styleNow()];
+  $('size').max = SIZE_MAX[styleNow()];                    // lowering max clamps the value
+  $('sizeOut').textContent = dotScale().toFixed(2);
+  $('bgOut').textContent = bgStrength() === 0 ? 'Off' : bgStrength().toFixed(2);
   $('gapOut').textContent = gap().toFixed(2);
   $('gainOut').textContent = '×' + gain().toFixed(2);
   const mesh = styleNow() === 'mesh'; $('sizeField').hidden = mesh; $('gapField').hidden = !mesh;
 }
-['n', 'size', 'tint', 'gap', 'gain'].forEach((id) => $(id).addEventListener('input', syncOutputs));
-['size', 'tint', 'gap', 'gain'].forEach((id) => $(id).addEventListener('input', () => scheduleDraw()));
+['n', 'size', 'tint', 'gap', 'gain', 'bg'].forEach((id) => $(id).addEventListener('input', syncOutputs));
+['size', 'tint', 'gap', 'gain', 'bg'].forEach((id) => $(id).addEventListener('input', () => scheduleDraw()));
 document.querySelectorAll('input[name=style]').forEach((r) => r.addEventListener('change', () => { syncOutputs(); scheduleDraw(); }));
 document.querySelectorAll('input[name=ink]').forEach((r) => r.addEventListener('change', () => {
   state.invert = $('inkDark').checked; run();
@@ -45,12 +49,13 @@ syncOutputs();
 
 // ── worker ──────────────────────────────────────────────────────────────────
 let wasmBytes = null;
+const wasmFile = async () => (wasmBytes ??= await (await fetch(ASSETS.wasm)).arrayBuffer());
 function startWorker() {
   if (state.worker) state.worker.terminate();
   const w = new Worker(ASSETS.worker);
   state.worker = w;
   state.ready = (async () => {
-    wasmBytes ??= await (await fetch(ASSETS.wasm)).arrayBuffer();
+    await wasmFile();
     await new Promise((res) => {
       w.onmessage = (e) => { if (e.data.type === 'ready') res(); };
       w.postMessage({ type: 'init', wasm: wasmBytes });
@@ -97,6 +102,37 @@ const geom = (pts) => {
   return xy;
 };
 
+// ── backdrop: the photo, pale, behind the marks ─────────────────────────────
+// A second instance of the wasm module on this thread recolours it (src/backdrop.rs): fast enough to follow
+// the sliders, and free while the worker is busy stippling.
+const bd = { ex: null, imgId: -1, key: '', canvas: null };
+const bdReady = wasmFile()
+  .then((b) => WebAssembly.instantiate(b, { env: { js_progress() {}, js_level() {} } }))
+  .then(({ instance }) => { bd.ex = instance.exports; scheduleDraw(); });
+
+/** The backdrop for the current image and sliders (an OffscreenCanvas the size of the photo), or null if off. */
+function backdrop() {
+  const s = bgStrength(), ex = bd.ex;
+  if (s === 0 || !ex || !state.crop) return null;
+  const { w, h } = state.crop;
+  if (bd.imgId !== state.imgId) {                       // copy the photo in once per image
+    const c = new OffscreenCanvas(w, h), g = c.getContext('2d', { willReadFrequently: true });
+    g.imageSmoothingQuality = 'high'; g.drawImage(state.img, 0, 0, w, h);
+    const px = g.getImageData(0, 0, w, h).data, p = ex.alloc(px.length);
+    new Uint8Array(ex.memory.buffer, p, px.length).set(px);
+    ex.set_photo(p, px.length); ex.dealloc(p, px.length);
+    bd.imgId = state.imgId; bd.key = ''; bd.canvas = c;
+  }
+  const t = tint(), k = gain(), paper = inkRGB()[1][0], key = `${t}|${k}|${s}|${paper}`;
+  if (key !== bd.key) {
+    const ptr = ex.backdrop(t, k, s, paper);
+    const px = new Uint8ClampedArray(ex.memory.buffer, ptr, w * h * 4).slice();
+    bd.canvas.getContext('2d').putImageData(new ImageData(px, w, h), 0, 0);
+    bd.key = key;
+  }
+  return bd.canvas;
+}
+
 // ── rendering ───────────────────────────────────────────────────────────────
 function sizeSheet() {
   const { w, h } = state.crop;
@@ -140,10 +176,11 @@ function groups(pts, geo, style, t, k = gain()) {
 const spacing = (pts) => state.crop.S / Math.sqrt(pts.length / 2);
 
 /** Draw points onto a 2D context of size W×H in the current style (a canvas, or svgContext() for the SVG export). */
-function paint(g, W, H, pts, geo, { style, scale, t, preview }) {
+function paint(g, W, H, pts, geo, { style, scale, t, preview, bg }) {
   const { ox, oy, w, h } = state.crop, px = W / w, [ink, paper] = inkRGB();
   g.setTransform(1, 0, 0, 1, 0, 0);
   g.fillStyle = css(...paper); g.fillRect(0, 0, W, H);
+  if (bg) { g.imageSmoothingQuality = 'high'; g.drawImage(bg, 0, 0, W, H); }   // the photo covers the whole sheet
   g.setTransform(px, 0, 0, px, -ox * px, -oy * px);      // square-pixel coordinates from here on
   const xy = geom(pts), n = pts.length / 2, sp = spacing(pts), minW = 0.35 / px;
   // skip marks lying in the padding around the photo (they would be clipped anyway)
@@ -183,7 +220,7 @@ function paint(g, W, H, pts, geo, { style, scale, t, preview }) {
 }
 
 /** Stand-in for the bits of the canvas API that paint() uses; records the drawing as SVG instead. */
-function svgContext(W, H) {
+function svgContext(W, H, hrefs = new Map()) {
   const out = [], f = (v) => +v.toFixed(2);
   let d = '', group = false;
   return {
@@ -193,6 +230,8 @@ function svgContext(W, H) {
       group = m.join() !== '1,0,0,1,0,0';
       if (group) out.push(`<g transform="matrix(${m.map(f).join(' ')})">`);
     },
+    drawImage(img, x, y, w, h) { out.push(`<image href="${hrefs.get(img)}" x="${f(x)}" y="${f(y)}" width="${f(w)}" height="${f(h)}" preserveAspectRatio="none"/>`); },
+    imageSmoothingQuality: 'high',
     fillRect(x, y, w, h) { out.push(`<rect x="${f(x)}" y="${f(y)}" width="${f(w)}" height="${f(h)}" fill="${this.fillStyle}"/>`); },
     beginPath() { d = ''; },
     moveTo(x, y) { d += `M${f(x)} ${f(y)}`; },
@@ -206,7 +245,7 @@ function svgContext(W, H) {
     },
   };
 }
-const opts = () => ({ style: styleNow(), scale: dotScale(), t: tint() });
+const opts = () => ({ style: styleNow(), scale: dotScale(), t: tint(), bg: backdrop() });
 
 function draw() {
   if (!state.crop) return;
@@ -308,9 +347,12 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 const base = () => state.name.replace(/\.[^.]+$/, '') + '-' + styleNow();
-$('svg').addEventListener('click', () => {
-  const { w, h } = state.crop, g = svgContext(w, h);
-  paint(g, w, h, state.points, state.geo, opts());
+const dataURL = (blob) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+$('svg').addEventListener('click', async () => {
+  const o = opts(), hrefs = new Map();
+  if (o.bg) hrefs.set(o.bg, await dataURL(await o.bg.convertToBlob({ type: 'image/png' })));   // embedded as a PNG
+  const { w, h } = state.crop, g = svgContext(w, h, hrefs);
+  paint(g, w, h, state.points, state.geo, o);
   download(new Blob([String(g)], { type: 'image/svg+xml' }), base() + '.svg');
 });
 $('png').addEventListener('click', async () => {

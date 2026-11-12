@@ -3,7 +3,7 @@
 pub const G: usize = 512;
 
 /// PIL ImagingConvert rgb2l (ITU-R 601-2 luma, fixed point).
-fn luma(r: u8, g: u8, b: u8) -> u8 {
+pub fn luma(r: u8, g: u8, b: u8) -> u8 {
     ((r as u32 * 19595 + g as u32 * 38470 + b as u32 * 7471 + 0x8000) >> 16) as u8
 }
 
