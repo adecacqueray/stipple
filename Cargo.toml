@@ -1,0 +1,20 @@
+[package]
+name = "stipple"
+version = "0.2.0"
+edition = "2021"
+description = "Recursive Gaussian blue-noise stippling (port of blue-sampler rgbn) and the geometry behind the web app"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustfft = { version = "6", default-features = false }
+delaunator = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

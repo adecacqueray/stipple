@@ -1,0 +1,93 @@
+:root {
+  --table: #e4e7e1;      /* drafting film */
+  --surface: #f2f4f0;
+  --text: #2a2e28;
+  --muted: #5e6559;
+  --rule: #c9cec4;
+  --npb: #6fa8dc;        /* non-photo blue: the illustrator's underdrawing pencil */
+  --npb-strong: #2c6aa3;
+  --button-text: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --table: #1b1e1a;
+    --surface: #242822;
+    --text: #e3e6df;
+    --muted: #a2a99c;
+    --rule: #3a4037;
+    --npb: #8cc0ea;
+    --npb-strong: #9fcbef;
+    --button-text: #10202e;
+  }
+}
+* { box-sizing: border-box; }
+html { font-size: 17px; }
+body {
+  margin: 0; background: var(--table); color: var(--text);
+  font-family: Spectral, Georgia, "Times New Roman", serif; line-height: 1.5;
+}
+.wrap { max-width: 1240px; margin: 0 auto; padding: 2.5rem 1.5rem 3rem; }
+header { margin-bottom: 2rem; max-width: 40rem; }
+h1 {
+  font-weight: 400; font-style: italic; font-size: 3.4rem; line-height: 1;
+  margin: 0 0 .6rem; letter-spacing: -0.01em;
+}
+header p { margin: 0; color: var(--muted); font-size: 1.05rem; }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 17rem; gap: 2.5rem; align-items: start; }
+@media (max-width: 860px) { .layout { grid-template-columns: 1fr; gap: 1.75rem; } h1 { font-size: 2.6rem; } }
+
+/* the plate: a sheet with registration ticks in non-photo blue */
+figure { margin: 0; }
+.plate { position: relative; padding: 18px; }
+.plate::before, .plate::after, .plate > .tick-b::before, .plate > .tick-b::after {
+  content: ""; position: absolute; width: 14px; height: 14px; border-color: var(--npb); border-style: solid;
+}
+.plate::before { top: 0; left: 0; border-width: 1px 0 0 1px; }
+.plate::after { top: 0; right: 0; border-width: 1px 1px 0 0; }
+.plate > .tick-b::before { bottom: 0; left: 0; border-width: 0 0 1px 1px; }
+.plate > .tick-b::after { bottom: 0; right: 0; border-width: 0 1px 1px 0; }
+canvas#sheet { display: block; width: 100%; height: auto; background: #fff; box-shadow: 0 1px 0 var(--rule); }
+.plate.dragging canvas#sheet { outline: 2px dashed var(--npb); outline-offset: 6px; }
+
+.progress { height: 2px; background: var(--rule); margin: 0 18px; overflow: hidden; }
+.progress > div { height: 100%; width: 0; background: var(--npb); transition: width .12s linear; }
+@media (prefers-reduced-motion: reduce) { .progress > div { transition: none; } }
+figcaption { margin: .7rem 18px 0; color: var(--muted); font-style: italic; min-height: 1.5em; }
+figcaption.error { color: #b3261e; font-style: normal; }
+
+aside { background: var(--surface); padding: 1.4rem 1.3rem 1.5rem; }
+.field { margin-bottom: 1.25rem; }
+.field:last-of-type { margin-bottom: 1.6rem; }
+.row { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+label, .label { font-weight: 600; font-size: .95rem; }
+output { font-variant-numeric: tabular-nums; color: var(--muted); }
+.hint { font-size: .85rem; color: var(--muted); margin: .25rem 0 0; }
+.hint a { color: inherit; }
+input[type=range] { width: 100%; accent-color: var(--npb-strong); margin: .4rem 0 0; }
+.seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--rule); margin-top: .45rem; }
+.seg.three { grid-template-columns: 1fr 1fr 1fr; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label { font-weight: 400; text-align: center; padding: .4rem .3rem; cursor: pointer; font-size: .9rem; }
+.seg input:checked + label { background: var(--text); color: var(--table); }
+.seg input:focus-visible + label { outline: 2px solid var(--npb-strong); outline-offset: 2px; }
+
+button, .file {
+  font: inherit; font-size: .95rem; cursor: pointer; display: block; width: 100%;
+  padding: .55rem .8rem; border: 1px solid var(--text); background: transparent; color: var(--text); text-align: center;
+}
+button:focus-visible, .file:focus-within { outline: 2px solid var(--npb-strong); outline-offset: 2px; }
+button.primary { background: var(--npb-strong); border-color: var(--npb-strong); color: var(--button-text); font-weight: 600; margin-top: .8rem; }
+button:disabled { opacity: .45; cursor: default; }
+.file { margin-top: .45rem; position: relative; }
+.file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin-top: .4rem; }
+
+/* caption and "Optimise further" under the drawing */
+.under { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin: .7rem 18px 0; }
+.under figcaption { margin: 0; flex: 1; }
+.under button { display: inline-block; width: auto; white-space: nowrap; padding: .4rem .8rem; }
+.gh { margin: 2.5rem 0 0; font-size: .95rem; color: var(--text); }
+.gh a { color: inherit; text-decoration: none; }
+.gh a:hover { text-decoration: underline; }

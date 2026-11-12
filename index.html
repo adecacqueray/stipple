@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1000">
+<title>Stipple – turn a photo into stippled ink dots</title>
+<meta name="description" content="Free online stippling tool: turn any photo into ink dots, mesh or strokes in your browser using recursive Gaussian blue noise (Rust/WebAssembly). Export SVG or PNG.">
+<meta name="keywords" content="stippling, stipple, stipple art, dot art, pointillism, blue noise, recursive gaussian blue noise, halftone, photo to dots, image to SVG, vector art, generative art, WebAssembly">
+<meta name="author" content="Armand de Cacqueray">
+<link rel="canonical" href="https://adecacqueray.github.io/stipple/">
+<meta property="og:title" content="Stipple – turn a photo into ink dots">
+<meta property="og:description" content="Stipple any image with blue-noise dots, right in your browser. Export SVG or PNG.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://adecacqueray.github.io/stipple/">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="web/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Stipple</h1>
+    <p>Turn a photo into ink dots.</p>
+  </header>
+
+  <div class="layout">
+    <figure>
+      <div class="plate" id="plate"><span class="tick-b"></span>
+        <canvas id="sheet" width="1000" height="960" aria-label="Stippled drawing"></canvas>
+      </div>
+      <div class="progress" aria-hidden="true"><div id="bar"></div></div>
+      <div class="under">
+        <figcaption id="caption" aria-live="polite">Loading the sample photo…</figcaption>
+        <button id="opt" disabled title="Run 120 more rgbn steps on the current dots">✨ Optimise further</button>
+      </div>
+    </figure>
+
+    <aside>
+      <div class="field">
+        <span class="label">Image</span>
+        <p class="hint"><span id="imgname">Sample: zebra</span> · CC Wikimedia Commons, <a href="https://commons.wikimedia.org/wiki/File:Equus_quagga_burchellii_-_Etosha,_2014.jpg">Yathin S Krishnappa</a></p>
+        <div class="file">Choose an image<input type="file" id="file" accept="image/*" aria-label="Choose an image"></div>
+        <p class="hint">Or drop one on the drawing.</p>
+      </div>
+
+      <div class="field">
+        <div class="row"><label for="n">Dots</label><output id="nOut" for="n"></output></div>
+        <input type="range" id="n" min="0" max="100" value="65">
+        <button class="primary" id="go" disabled>Stipple</button>
+      </div>
+
+      <div class="field">
+        <span class="label" id="styleLabel">Style</span>
+        <div class="seg three" role="radiogroup" aria-labelledby="styleLabel">
+          <input type="radio" name="style" id="stDots" value="dots" checked><label for="stDots">⚫ Dots</label>
+          <input type="radio" name="style" id="stMesh" value="mesh"><label for="stMesh">🕸️ Mesh</label>
+          <input type="radio" name="style" id="stStrokes" value="strokes"><label for="stStrokes">〰️ Stroke</label>
+        </div>
+      </div>
+
+      <div class="field" id="sizeField">
+        <div class="row"><label for="size" id="sizeLabel">Dot size</label><output id="sizeOut" for="size"></output></div>
+        <input type="range" id="size" min="10" max="100" value="100">
+      </div>
+
+      <div class="field" id="gapField" hidden>
+        <div class="row"><label for="gap">Gap</label><output id="gapOut" for="gap"></output></div>
+        <input type="range" id="gap" min="1" max="10" value="5">
+      </div>
+
+      <div class="field">
+        <div class="row"><label for="tint">Colour</label><output id="tintOut" for="tint"></output></div>
+        <input type="range" id="tint" min="0" max="100" value="100">
+      </div>
+
+      <div class="field">
+        <div class="row"><label for="gain">Contrast</label><output id="gainOut" for="gain"></output></div>
+        <input type="range" id="gain" min="30" max="300" value="100">
+        <p class="hint">Colour multiplier</p>
+      </div>
+
+      <div class="field">
+        <span class="label" id="inkLabel">Ink</span>
+        <div class="seg" role="radiogroup" aria-labelledby="inkLabel">
+          <input type="radio" name="ink" id="inkDark" value="dark" checked><label for="inkDark">Black on white</label>
+          <input type="radio" name="ink" id="inkLight" value="light"><label for="inkLight">White on black</label>
+        </div>
+      </div>
+
+      <div class="pair">
+        <button id="svg" disabled>Save SVG</button>
+        <button id="png" disabled>Save PNG</button>
+      </div>
+    </aside>
+  </div>
+  <p class="gh"><a href="https://github.com/adecacqueray/stipple">🟦 source on GitHub</a></p>
+</div>
+<script src="web/main.js"></script>
+</body>
+</html>
