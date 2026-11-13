@@ -68,6 +68,8 @@ output { font-variant-numeric: tabular-nums; color: var(--muted); }
 input[type=range] { width: 100%; accent-color: var(--npb-strong); margin: .4rem 0 0; }
 .seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--rule); margin-top: .45rem; }
 .seg.three { grid-template-columns: 1fr 1fr 1fr; }
+.seg + .seg { margin-top: .5rem; }
+input[type=color] { display: block; width: 100%; height: 2.1rem; margin: .45rem 0 0; padding: 2px; border: 1px solid var(--rule); background: transparent; cursor: pointer; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
 .seg label { font-weight: 400; text-align: center; padding: .4rem .3rem; cursor: pointer; font-size: .9rem; }
 .seg input:checked + label { background: var(--text); color: var(--table); }

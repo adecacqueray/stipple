@@ -9,6 +9,7 @@ const sheet = $('sheet'), ctx = sheet.getContext('2d');
 
 const state = {
   img: null, name: 'zebra', imgId: 0, points: null, preview: null,
+  pix: null,      // copy of the padded square sent to the worker, to colour the live preview
   geo: null,      // per-dot geometry from the worker: rgb, cellRgb, ink, dir, verts/off (cells), edges
   crop: null,     // {S, ox, oy, w, h}: image rect inside the padded square, in square pixels
   invert: true, worker: null, ready: null, busy: false, ms: 0, extra: 0, extraMs: 0,
@@ -25,6 +26,11 @@ const gap = () => +$('gap').value / 100;
 const gain = () => +$('gain').value / 100;
 const bgStrength = () => +$('bg').value / 100;
 const styleNow = () => document.querySelector('input[name=style]:checked').value;
+const mono = () => $('palMono').checked;
+const monoRGB = () => { const h = $('mono').value; return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); };
+// what the drawing actually uses: monochrome means one ink colour, no photo hue and no colour multiplier
+const tintNow = () => mono() ? 0 : tint();
+const gainNow = () => mono() ? 1 : gain();
 const SIZE_LABEL = { dots: 'Dot size', mesh: 'Dot size', strokes: 'Stroke width' };
 const SIZE_MAX = { dots: 100, mesh: 100, strokes: 160 };   // strokes may go wider than dots
 function syncOutputs() {
@@ -38,10 +44,17 @@ function syncOutputs() {
   $('gapOut').textContent = gap().toFixed(2);
   $('gainOut').textContent = '×' + gain().toFixed(2);
   const mesh = styleNow() === 'mesh'; $('sizeField').hidden = mesh; $('gapField').hidden = !mesh;
+  $('bgField').hidden = mesh;                                // the cells cover the whole sheet: a backdrop would never show
+  const m = mono();
+  $('monoField').hidden = !m; $('tintField').hidden = m; $('gainField').hidden = m;
+  $('monoOut').textContent = $('mono').value.toUpperCase();
+  $('inkDarkLabel').textContent = m ? 'Ink on white' : 'Black on white';
+  $('inkLightLabel').textContent = m ? 'Ink on black' : 'White on black';
 }
 ['n', 'size', 'tint', 'gap', 'gain', 'bg'].forEach((id) => $(id).addEventListener('input', syncOutputs));
-['size', 'tint', 'gap', 'gain', 'bg'].forEach((id) => $(id).addEventListener('input', () => scheduleDraw()));
-document.querySelectorAll('input[name=style]').forEach((r) => r.addEventListener('change', () => { syncOutputs(); scheduleDraw(); }));
+['size', 'tint', 'gap', 'gain', 'bg', 'mono'].forEach((id) => $(id).addEventListener('input', () => scheduleDraw()));
+$('mono').addEventListener('input', syncOutputs);
+document.querySelectorAll('input[name=style], input[name=palette]').forEach((r) => r.addEventListener('change', () => { syncOutputs(); scheduleDraw(); }));
 document.querySelectorAll('input[name=ink]').forEach((r) => r.addEventListener('change', () => {
   state.invert = $('inkDark').checked; run();
 }));
@@ -123,7 +136,7 @@ function backdrop() {
     ex.set_photo(p, px.length); ex.dealloc(p, px.length);
     bd.imgId = state.imgId; bd.key = ''; bd.canvas = c;
   }
-  const t = tint(), k = gain(), paper = inkRGB()[1][0], key = `${t}|${k}|${s}|${paper}`;
+  const t = tintNow(), k = gainNow(), paper = inkRGB()[1][0], key = `${t}|${k}|${s}|${paper}`;
   if (key !== bd.key) {
     const ptr = ex.backdrop(t, k, s, paper);
     const px = new Uint8ClampedArray(ex.memory.buffer, ptr, w * h * 4).slice();
@@ -141,7 +154,11 @@ function sizeSheet() {
   sheet.width = Math.round(cssW * dpr);
   sheet.height = Math.round(cssW * dpr * h / w);
 }
-const inkRGB = () => state.invert ? [[0, 0, 0], [255, 255, 255]] : [[255, 255, 255], [0, 0, 0]];   // [ink, paper]
+/** [ink, paper]. Monochrome swaps the black or white ink for the chosen colour; the paper stays white or black. */
+function inkRGB() {
+  const [ink, paper] = state.invert ? [[0, 0, 0], [255, 255, 255]] : [[255, 255, 255], [0, 0, 0]];
+  return [mono() ? monoRGB() : ink, paper];
+}
 const css = (r, g, b) => `rgb(${r},${g},${b})`;
 
 /** The photo's hue at full ink strength. Tone is already carried by the dot density (or the cell area in mesh),
@@ -156,7 +173,7 @@ function fullInk(r, g, b, ink, paper) {
 }
 
 /** Final colour of each point's mark for the current style and colour slider, grouped into buckets of equal colour. */
-function groups(pts, geo, style, t, k = gain()) {
+function groups(pts, geo, style, t, k = gainNow()) {
   const n = pts.length / 2, [ink, paper] = inkRGB();
   const cv = style === 'mesh' ? geo.ink : null;
   const rgb = t > 0 ? (cv ? geo.cellRgb : geo.rgb) : null;
@@ -188,7 +205,7 @@ function paint(g, W, H, pts, geo, { style, scale, t, preview, bg }) {
   const all = () => Array.from({ length: n }, (_, i) => i);
   if (preview || style === 'dots') {
     const r = Math.max(minW, scale * 0.5 * sp);
-    for (const [col, idx] of preview ? [[preview, all()]] : groups(pts, geo, 'dots', t)) {
+    for (const [col, idx] of preview ? previewGroups(pts, t) : groups(pts, geo, 'dots', t)) {
       g.fillStyle = col; g.beginPath();
       for (const i of idx) if (inView(i)) { const X = xy[2 * i], Y = xy[2 * i + 1]; g.moveTo(X + r, Y); g.arc(X, Y, r, 0, Math.PI * 2); }
       g.fill();
@@ -203,7 +220,7 @@ function paint(g, W, H, pts, geo, { style, scale, t, preview, bg }) {
       }
       g.fill(); g.stroke();                                 // 1-device-px stroke in the cell's own colour hides antialiasing seams
     }
-    g.strokeStyle = '#000'; g.lineWidth = gap() * sp;   // exact gap width, no minimum
+    g.strokeStyle = mono() ? css(...ink) : '#000'; g.lineWidth = gap() * sp;   // exact gap width, no minimum
     g.beginPath();
     for (let k = 0; k < edges.length; k += 4) { g.moveTo(edges[k], edges[k + 1]); g.lineTo(edges[k + 2], edges[k + 3]); }
     g.stroke();
@@ -245,14 +262,31 @@ function svgContext(W, H, hrefs = new Map()) {
     },
   };
 }
-const opts = () => ({ style: styleNow(), scale: dotScale(), t: tint(), bg: backdrop() });
+const opts = () => ({ style: styleNow(), scale: dotScale(), t: tintNow(), bg: styleNow() === 'mesh' ? null : backdrop() });
+
+/** Colours for the coarse levels shown while the stippler runs: the photo under each dot (as the final dots get),
+ *  so the Monochrome / Polychrome choice already shows during the fit. */
+const previewRgb = new WeakMap();
+function previewGroups(pts, t) {
+  const n = pts.length / 2;
+  if (t === 0 || !state.pix) return [[css(...inkRGB()[0]), Array.from({ length: n }, (_, i) => i)]];
+  let rgb = previewRgb.get(pts);
+  if (!rgb) {
+    const xy = geom(pts), { rgba, S } = state.pix; rgb = new Uint8Array(3 * n);
+    for (let i = 0; i < n; i++) {
+      const x = Math.min(S - 1, Math.max(0, xy[2 * i] | 0)), y = Math.min(S - 1, Math.max(0, xy[2 * i + 1] | 0)), o = (y * S + x) * 4;
+      rgb[3 * i] = rgba[o]; rgb[3 * i + 1] = rgba[o + 1]; rgb[3 * i + 2] = rgba[o + 2];
+    }
+    previewRgb.set(pts, rgb);
+  }
+  return groups(pts, { rgb }, 'dots', t);
+}
 
 function draw() {
   if (!state.crop) return;
   if (state.points) return paint(ctx, sheet.width, sheet.height, state.points, state.geo, opts());
   if (state.preview) {
-    const npb = getComputedStyle(document.documentElement).getPropertyValue('--npb').trim();
-    paint(ctx, sheet.width, sheet.height, state.preview, null, { ...opts(), preview: npb });
+    paint(ctx, sheet.width, sheet.height, state.preview, null, { ...opts(), preview: true });
   }
 }
 let drawQueued = false;
@@ -283,6 +317,7 @@ async function run() {
   $('bar').style.width = '0%';
   state.points = null; state.geo = null; state.preview = null; state.extra = 0; state.extraMs = 0;
   const { rgba, S } = squarePixels();
+  state.pix = { rgba: rgba.slice(), S };    // the original goes to the worker
   sizeSheet();
   ctx.fillStyle = css(...inkRGB()[1]); ctx.fillRect(0, 0, sheet.width, sheet.height);
   await state.ready;

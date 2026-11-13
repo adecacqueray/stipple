@@ -57,6 +57,15 @@
           <input type="radio" name="style" id="stMesh" value="mesh"><label for="stMesh">🕸️ Mesh</label>
           <input type="radio" name="style" id="stStrokes" value="strokes"><label for="stStrokes">〰️ Stroke</label>
         </div>
+        <div class="seg" role="radiogroup" aria-label="Colours">
+          <input type="radio" name="palette" id="palMono" value="mono"><label for="palMono">🟦 Monochrome</label>
+          <input type="radio" name="palette" id="palPoly" value="poly" checked><label for="palPoly">🎨 Polychrome</label>
+        </div>
+      </div>
+
+      <div class="field" id="monoField" hidden>
+        <div class="row"><label for="mono">Ink colour</label><output id="monoOut" for="mono"></output></div>
+        <input type="color" id="mono" value="#0000e6">
       </div>
 
       <div class="field" id="sizeField">
@@ -69,18 +78,18 @@
         <input type="range" id="gap" min="1" max="10" value="5">
       </div>
 
-      <div class="field">
+      <div class="field" id="tintField">
         <div class="row"><label for="tint">Colour</label><output id="tintOut" for="tint"></output></div>
         <input type="range" id="tint" min="0" max="100" value="100">
       </div>
 
-      <div class="field">
+      <div class="field" id="gainField">
         <div class="row"><label for="gain">Contrast</label><output id="gainOut" for="gain"></output></div>
         <input type="range" id="gain" min="30" max="300" value="100">
         <p class="hint">Colour multiplier</p>
       </div>
 
-      <div class="field">
+      <div class="field" id="bgField">
         <div class="row"><label for="bg">Background</label><output id="bgOut" for="bg"></output></div>
         <input type="range" id="bg" min="0" max="100" value="50">
         <p class="hint">Pale photo behind the marks</p>
@@ -89,8 +98,8 @@
       <div class="field">
         <span class="label" id="inkLabel">Ink</span>
         <div class="seg" role="radiogroup" aria-labelledby="inkLabel">
-          <input type="radio" name="ink" id="inkDark" value="dark" checked><label for="inkDark">Black on white</label>
-          <input type="radio" name="ink" id="inkLight" value="light"><label for="inkLight">White on black</label>
+          <input type="radio" name="ink" id="inkDark" value="dark" checked><label for="inkDark" id="inkDarkLabel">Black on white</label>
+          <input type="radio" name="ink" id="inkLight" value="light"><label for="inkLight" id="inkLightLabel">White on black</label>
         </div>
       </div>
 
