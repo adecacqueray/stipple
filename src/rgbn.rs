@@ -18,6 +18,9 @@ const LR: f32 = 0.3;
 /// Grid neighbourhood of the pair sum. A dot in a pale area next to a dark one has many more neighbours
 /// within reach than a dot in a flat area: 7 keeps the density of pale areas within ~6 % (10: ~1 %, 3× slower).
 const STENCIL: i32 = 7;
+/// Wider neighbourhood for "Optimise further": the truncated pair sum otherwise leaves a residual jitter
+/// where the density changes sharply (~3× smaller with 10), at ~2× the cost per step.
+const REFINE_STENCIL: i32 = 10;
 const ROOT_N_ITER: usize = 20;
 const N_PER_STEP: usize = 10;
 /// Kernels stop growing below this density (× the mean): keeps near-white areas finite.
@@ -59,13 +62,14 @@ pub struct Rgbn {
     rng: Rng,
     density: Density,
     shifts: Vec<(i32, i32)>,
+    refine_shifts: Vec<(i32, i32)>,
     /// (dot count, local density map a) of the last level optimised
     amap: Option<(usize, Vec<f32>)>,
 }
 
 impl Rgbn {
     pub fn new(rho: Vec<f64>, seed: u64) -> Self {
-        Rgbn { rng: Rng::new(seed), density: Density::new(rho), shifts: half_ball(STENCIL), amap: None }
+        Rgbn { rng: Rng::new(seed), density: Density::new(rho), shifts: half_ball(STENCIL), refine_shifts: half_ball(REFINE_STENCIL), amap: None }
     }
 
     fn set_level(&mut self, n: usize) {
@@ -93,7 +97,7 @@ impl Rgbn {
         for (k, &m) in sizes.iter().enumerate() {
             self.set_level(m);
             x = if k == 0 { self.draw(m) } else { self.clone(&x, m) };
-            x = self.descend(x, steps(k), &mut || { done += (m * N_PER_STEP) as f64; obs.progress(done, total); });
+            x = self.descend(x, steps(k), false, &mut || { done += (m * N_PER_STEP) as f64; obs.progress(done, total); });
             obs.level_done(&x);
         }
         x
@@ -104,7 +108,7 @@ impl Rgbn {
         if n == 0 { return x; }
         self.set_level(n);
         let mut done = 0;
-        self.descend(x, steps, &mut || { done += N_PER_STEP; obs.progress(done.min(steps) as f64, steps as f64); })
+        self.descend(x, steps, true, &mut || { done += N_PER_STEP; obs.progress(done.min(steps) as f64, steps as f64); })
     }
 
     /// Root level: dots drawn from the density (rejection sampling).
@@ -136,8 +140,8 @@ impl Rgbn {
     }
 
     /// Preconditioned gradient descent on the GBN energy. Dots are re-sorted onto the grid, and their
-    /// kernel sizes re-read, every N_PER_STEP steps.
-    fn descend(&mut self, x: Vec<[f32; 2]>, steps: usize, on_sort: &mut dyn FnMut()) -> Vec<[f32; 2]> {
+    /// kernel sizes re-read, every N_PER_STEP steps. `wide` uses the refine stencil.
+    fn descend(&mut self, x: Vec<[f32; 2]>, steps: usize, wide: bool, on_sort: &mut dyn FnMut()) -> Vec<[f32; 2]> {
         let n = x.len();
         let gi = (n as f64).sqrt().ceil() as usize;
         let cells = gi * gi;
@@ -175,7 +179,7 @@ impl Rgbn {
                 }
                 on_sort();
             }
-            micro_grad(&grid, &ga, gi, &self.shifts, inv_s2, &mut gx, &mut cb);
+            micro_grad(&grid, &ga, gi, if wide { &self.refine_shifts } else { &self.shifts }, inv_s2, &mut gx, &mut cb);
             for c in 0..cells {
                 let v = grid[c];
                 if v[0].is_nan() { continue; }

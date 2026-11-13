@@ -3,7 +3,7 @@
 const ASSETS = { worker: 'web/worker.js', wasm: 'web/stipple.wasm', sample: 'web/zebra.jpg' };
 const MAX_SIDE = 1600;              // working resolution sent to the stippler (it resamples to 512² anyway)
 const ITERS = 12;                   // passes per level for the initial stipple (blue-sampler's default)
-const OPT_STEPS = ITERS * 10;       // rgbn steps per "Optimise further" click (one more pass of the finest level)
+const OPT_STEPS = ITERS * 5;        // rgbn steps per "Optimise further" click (half a pass of the finest level, wider stencil)
 const $ = (id) => document.getElementById(id);
 const sheet = $('sheet'), ctx = sheet.getContext('2d');
 
@@ -27,6 +27,7 @@ const gain = () => +$('gain').value / 100;
 const bgStrength = () => +$('bg').value / 100;
 const styleNow = () => document.querySelector('input[name=style]:checked').value;
 const mono = () => $('palMono').checked;
+const normalise = () => $('normOn').checked;
 const monoRGB = () => { const h = $('mono').value; return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); };
 // what the drawing actually uses: monochrome means one ink colour, no photo hue and no colour multiplier
 const tintNow = () => mono() ? 0 : tint();
@@ -36,7 +37,7 @@ const SIZE_MAX = { dots: 100, mesh: 100, strokes: 160 };   // strokes may go wid
 function syncOutputs() {
   $('nOut').textContent = fmt(N());
   const t = tint();
-  $('tintOut').textContent = t === 0 ? 'Black & white' : t === 1 ? 'Full colour' : t.toFixed(2);
+  $('tintOut').textContent = t === 0 ? (normalise() ? 'Black & white' : 'Greys') : t === 1 ? 'Full colour' : t.toFixed(2);
   $('sizeLabel').textContent = SIZE_LABEL[styleNow()];
   $('size').max = SIZE_MAX[styleNow()];                    // lowering max clamps the value
   $('sizeOut').textContent = dotScale().toFixed(2);
@@ -45,6 +46,7 @@ function syncOutputs() {
   $('gainOut').textContent = '×' + gain().toFixed(2);
   const mesh = styleNow() === 'mesh'; $('sizeField').hidden = mesh; $('gapField').hidden = !mesh;
   $('bgField').hidden = mesh;                                // the cells cover the whole sheet: a backdrop would never show
+  $('normField').hidden = mono() && !mesh;                  // in monochrome only the mesh tone depends on it
   const m = mono();
   $('monoField').hidden = !m; $('tintField').hidden = m; $('gainField').hidden = m;
   $('monoOut').textContent = $('mono').value.toUpperCase();
@@ -54,7 +56,7 @@ function syncOutputs() {
 ['n', 'size', 'tint', 'gap', 'gain', 'bg'].forEach((id) => $(id).addEventListener('input', syncOutputs));
 ['size', 'tint', 'gap', 'gain', 'bg', 'mono'].forEach((id) => $(id).addEventListener('input', () => scheduleDraw()));
 $('mono').addEventListener('input', syncOutputs);
-document.querySelectorAll('input[name=style], input[name=palette]').forEach((r) => r.addEventListener('change', () => { syncOutputs(); scheduleDraw(); }));
+document.querySelectorAll('input[name=style], input[name=palette], input[name=norm]').forEach((r) => r.addEventListener('change', () => { syncOutputs(); scheduleDraw(); }));
 document.querySelectorAll('input[name=ink]').forEach((r) => r.addEventListener('change', () => {
   state.invert = $('inkDark').checked; run();
 }));
@@ -172,18 +174,34 @@ function fullInk(r, g, b, ink, paper) {
   return [ink[0] + (paper[0] + dr * s - ink[0]) * w, ink[1] + (paper[1] + dg * s - ink[1]) * w, ink[2] + (paper[2] + db * s - ink[2]) * w];
 }
 
-/** Final colour of each point's mark for the current style and colour slider, grouped into buckets of equal colour. */
+/** Final colour of each point's mark for the current style and colour slider, grouped into buckets of equal colour.
+ *  Normalise on (default): full-strength hue (fullInk), the tone being carried by the dot density, or in mesh by
+ *  the cell area.
+ *  Normalise off: the photo's own colour, untouched: the colour under the dot or stroke, or the cell's mean colour;
+ *  the colour slider blends it from its grey (0) to full colour (1). In monochrome, mesh cells then go from paper
+ *  to ink by the cell's own darkness, and dots and strokes stay plain ink. */
 function groups(pts, geo, style, t, k = gainNow()) {
-  const n = pts.length / 2, [ink, paper] = inkRGB();
-  const cv = style === 'mesh' ? geo.ink : null;
-  const rgb = t > 0 ? (cv ? geo.cellRgb : geo.rgb) : null;
+  const n = pts.length / 2, [ink, paper] = inkRGB(), m = mono();
+  const mesh = style === 'mesh', raw = !normalise();
+  const own = raw && !m, monoMesh = raw && m && mesh;
+  const cv = mesh && !raw ? geo.ink : null;
+  const src = mesh ? geo.cellRgb : geo.rgb;
+  const rgb = own || monoMesh || t > 0 ? src : null;
   const map = new Map();
   for (let i = 0; i < n; i++) {
     let [r, g, b] = ink;
-    // hue only, at constant strength, blended in by the colour slider
-    if (rgb) { const c = fullInk(rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2], ink, paper); r += (c[0] - r) * t; g += (c[1] - g) * t; b += (c[2] - b) * t; }
-    // mesh: the tone comes from the cell area, like the density does for dots
-    if (cv) { const a = cv[i]; r = paper[0] + (r - paper[0]) * a; g = paper[1] + (g - paper[1]) * a; b = paper[2] + (b - paper[2]) * a; }
+    if (own) {
+      const R = rgb[3 * i], G = rgb[3 * i + 1], B = rgb[3 * i + 2], y = 0.299 * R + 0.587 * G + 0.114 * B;
+      r = y + (R - y) * t; g = y + (G - y) * t; b = y + (B - y) * t;
+    } else if (monoMesh) {  // paper → ink by how far the cell is from the paper
+      const y = 0.299 * rgb[3 * i] + 0.587 * rgb[3 * i + 1] + 0.114 * rgb[3 * i + 2], a = Math.abs(paper[0] - y) / 255;
+      r = paper[0] + (r - paper[0]) * a; g = paper[1] + (g - paper[1]) * a; b = paper[2] + (b - paper[2]) * a;
+    } else {
+      // hue only, at constant strength, blended in by the colour slider
+      if (rgb) { const c = fullInk(rgb[3 * i], rgb[3 * i + 1], rgb[3 * i + 2], ink, paper); r += (c[0] - r) * t; g += (c[1] - g) * t; b += (c[2] - b) * t; }
+      // mesh: the tone comes from the cell area, like the density does for dots
+      if (cv) { const a = cv[i]; r = paper[0] + (r - paper[0]) * a; g = paper[1] + (g - paper[1]) * a; b = paper[2] + (b - paper[2]) * a; }
+    }
     const q = (v) => Math.min(255, Math.round(v * k / 4) * 4);   // contrast: multiply, clip at 255
     const key = css(q(r), q(g), q(b));
     let arr = map.get(key); if (!arr) map.set(key, arr = []); arr.push(i);
@@ -269,7 +287,7 @@ const opts = () => ({ style: styleNow(), scale: dotScale(), t: tintNow(), bg: st
 const previewRgb = new WeakMap();
 function previewGroups(pts, t) {
   const n = pts.length / 2;
-  if (t === 0 || !state.pix) return [[css(...inkRGB()[0]), Array.from({ length: n }, (_, i) => i)]];
+  if (!state.pix || (t === 0 && (normalise() || mono()))) return [[css(...inkRGB()[0]), Array.from({ length: n }, (_, i) => i)]];
   let rgb = previewRgb.get(pts);
   if (!rgb) {
     const xy = geom(pts), { rgba, S } = state.pix; rgb = new Uint8Array(3 * n);

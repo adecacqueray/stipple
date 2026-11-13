@@ -32,7 +32,7 @@
       <div class="progress" aria-hidden="true"><div id="bar"></div></div>
       <div class="under">
         <figcaption id="caption" aria-live="polite">Loading the sample photo…</figcaption>
-        <button id="opt" disabled title="Run 120 more rgbn steps on the current dots">✨ Optimise further</button>
+        <button id="opt" disabled title="Run 60 more rgbn steps on the current dots, with a wider neighbourhood">✨ Optimise further</button>
       </div>
     </figure>
 
@@ -61,6 +61,15 @@
           <input type="radio" name="palette" id="palMono" value="mono"><label for="palMono">🟦 Monochrome</label>
           <input type="radio" name="palette" id="palPoly" value="poly" checked><label for="palPoly">🎨 Polychrome</label>
         </div>
+      </div>
+
+      <div class="field" id="normField" hidden>
+        <span class="label" id="normLabel">Normalise</span>
+        <div class="seg" role="radiogroup" aria-labelledby="normLabel">
+          <input type="radio" name="norm" id="normOn" value="on" checked><label for="normOn">On</label>
+          <input type="radio" name="norm" id="normOff" value="off"><label for="normOff">Off</label>
+        </div>
+        <p class="hint">On: full-strength hue. Off: the photo's own colours</p>
       </div>
 
       <div class="field" id="monoField" hidden>
